@@ -1,0 +1,107 @@
+#!/bin/sh
+#inspired by HellBrick
+#author: https://github.com/bessgeor
+#source code and more docs are available at https://github.com/bessgeor/prepend-task-number-from-branch-to-commit-message-hook
+#license: MIT
+
+# FAQ
+# 1. У меня другой проект в YouTrack, как научить хук с ним работать?
+# - изменить значение переменной youtrack_project_slug на слаг нужного проекта
+youtrack_project_slug='CSMS'
+# 2. Как добавить префикс к номеру задачи, например, писать ticket #CSMS-123456?
+# - Задать 'ticket #' значением переменной to_insert_prefix
+to_insert_prefix=''
+# 3. Как отключить капитализацию?
+# - задать переменной capitalization_behaviour значение 'none'. Чтобы вернуть - выставить в 'capitalize'
+capitalization_behaviour='capitalize'
+# 4. Как убрать исключение на капитализацию выражений в квадратных скобках?
+# - изменить регулярку в переменной capitalization_regex, у меня готовой нет, нужно будет - пишите
+capitalization_regex="^((?:$to_insert_prefix(?:$youtrack_project_slug-\\d+(?:, )?)+:? ?)?(?:\\[[^\\]]+\\] ?)*)(.)"
+# 5. Как добавить ветку-исключение, например, gitkraken-temp?
+# - добавить в конец значения переменной pipe_separated_system_branches '|gitkraken-temp'
+pipe_separated_system_branches='smartgit-temp|bitbucket-temp|master|release|release-candidate|develop'
+# 6. Как сделать, чтобы коммит не падал, если не удаётся дописать номер тикета?
+# - задать переменной forbid_committing_without_ticket_number значение 0. Чтобы запретить обратно - значение 1.
+forbid_committing_without_ticket_number=1
+# 7. Как запретить замену номера тикета при черри-пике?
+# - Изменить значение переменной another_ticket_found_behaviour. Доступные значения:
+#   1. 'replace' - если находим - заменяем: "CSMS-161234 done whatever" -> "CSMS-123456: Done whatever"
+#   2. 'merge' - если находим - пишем оба тикета через запятую: "CSMS-161234 done whatever" -> "CSMS-161234, CSMS-123456: Done whatever"
+#   3. 'keep' - оставляем старый тикет, форматируем по необходимости: "CSMS-161234 done whatever" -> "CSMS-161234: Done whatever"
+another_ticket_found_behaviour='merge'
+# 8. Как сделать чтобы работало для ветки CSMS-1234 без __?
+# - Закомментировать строку ниже
+branch_required_ticket_prefix='__'
+
+
+
+commit_msg_file="$1"
+
+# capitalize message
+if [ "$capitalization_behaviour" == 'capitalize' ]
+then
+    perl_command="s/$capitalization_regex/\$1\\u\$2/"
+    message=`perl -pe "$perl_command" "$commit_msg_file"`
+    echo "$message" > "$commit_msg_file"
+fi
+
+echo -n "" > 'prep-commit-msg-temp'
+detached_head='unnamed branch'
+current_branch="$(git symbolic-ref HEAD 2>'prep-commit-msg-temp')" || "$detached_head"
+if [ ! -z "$(cat 'prep-commit-msg-temp')" ]
+then
+    current_branch="$detached_head"
+fi
+rm prep-commit-msg-temp
+
+ticket=""
+if [ -z "$branch_required_ticket_prefix" ]
+then
+    ticket=`echo $current_branch | awk -F "/" '{ print $NF }' | LC_ALL=en_US.utf8 grep -Po "^(?:[\\w\\-\\_]+/)*($youtrack_project_slug\\-[0-9]+)\\$"`
+else
+    ticket=`echo $current_branch | awk -F "$branch_required_ticket_prefix" '{ print $NF }' | LC_ALL=en_US.utf8 grep -P "^$youtrack_project_slug\\-[0-9]+\\$"`
+fi
+
+if [ ! -z "$ticket" ]
+then
+    old_ticket='none'
+    if [ $(echo -n $to_insert_prefix | wc -m) -gt 0 ]
+    then old_ticket=`cat "$commit_msg_file" | awk -F "$to_insert_prefix" '{ print $NF }' | LC_ALL=en_US.utf8 grep -Po "^($youtrack_project_slug-[0-9]+(, )?)+"`
+    else old_ticket=`cat "$commit_msg_file" | LC_ALL=en_US.utf8 grep -Po "^($youtrack_project_slug-[0-9]+(, )?)+"`
+    fi
+
+    if [ "$old_ticket" != 'none' ] && [ ! -z "$old_ticket" ]
+    then
+        to_insert='definetely nothing'
+        if [ "$another_ticket_found_behaviour" == 'replace' ] || [ "$old_ticket" == "$ticket" ]
+        then # replace old ticket with the new one (or format the same ticket)
+            to_insert="$to_insert_prefix$ticket: "
+        elif [ "$another_ticket_found_behaviour" == 'merge' ]
+        then # merge old and new
+            to_insert="$to_insert_prefix$old_ticket, $ticket: "
+        elif [ "$another_ticket_found_behaviour" == 'keep' ]
+        then # keep old ticket number, capitalize and add ':' if needed
+            to_insert="$to_insert_prefix$old_ticket: "
+        fi
+        if [ "$to_insert" != 'definetely nothing' ]
+        then
+            to_replace="^$to_insert_prefix$old_ticket:? ?"
+            echo -n `sed -E "s/$to_replace/$to_insert/" "$commit_msg_file"` > "$commit_msg_file"
+        fi
+    else # just prepend ticket number
+        echo -n "$to_insert_prefix$ticket: " > "$commit_msg_file"
+        echo -n "$message" >> "$commit_msg_file"
+    fi
+else
+    should_fail=`echo $current_branch | LC_ALL=en_US.utf8 grep -oP "(?:$pipe_separated_system_branches|$detached_head)"`
+    if [ -z "$should_fail" ]
+    then
+        echo 'no ticket id in the branch name' >&2
+        if [ $forbid_committing_without_ticket_number ]
+        then
+            exit 1
+        else
+            exit 0
+        fi
+    fi
+fi
